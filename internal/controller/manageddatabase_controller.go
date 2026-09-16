@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/Developer-dreamer/manageddatabase-operator.git/api/v1alpha1"
@@ -53,6 +52,16 @@ func (r *ManagedDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Get(ctx, req.NamespacedName, &dbCr); err != nil {
 		// If not found, it was deleted; ignore to stop reconciliation
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Check if database exists and has state READY or FAILED
+	if dbCr.Status.DatabaseID != "" {
+		if dbCr.Status.State == "PROVISIONING" {
+			// Cluster database status requires to be updated. Fetching status from operator
+			return r.fetchStatus(ctx, dbCr)
+		}
+		logger.Info("Database already exists", "id", dbCr.Status.DatabaseID)
+		return ctrl.Result{}, nil
 	}
 
 	return r.createDatabase(ctx, dbCr)
@@ -127,6 +136,68 @@ func (r *ManagedDatabaseReconciler) createDatabase(ctx context.Context, dbCr dem
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	default:
+		logger.Info("Unknown error", "status", resp.StatusCode)
+		return ctrl.Result{}, fmt.Errorf("unexpected status from API: %d", resp.StatusCode)
+	}
+}
+
+func (r *ManagedDatabaseReconciler) fetchStatus(ctx context.Context, dbCr demov1alpha1.ManagedDatabase) (ctrl.Result, error) {
+	logger := logf.FromContext(ctx)
+
+	url := fmt.Sprintf("%s/databases/%s", r.ProvisionerURL, dbCr.Status.DatabaseID)
+	resp, err := http.Get(url)
+	if err != nil {
+		logger.Error(err, "HTTP request failed")
+		return ctrl.Result{}, err // Controller-runtime will re-queue with backoff
+	}
+	defer func() {
+		// Draining leftovers to reuse TCP socket from idle connections
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Error(closeErr, "failed to close response body")
+			if err == nil {
+				err = closeErr
+			}
+		}
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var apiResp struct {
+			ID       string `json:"id"`
+			State    string `json:"state"`
+			Endpoint string `json:"endpoint"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+			logger.Error(err, "Failed to unmarshal response")
+			return ctrl.Result{}, err
+		}
+
+		if apiResp.Endpoint == "" && apiResp.State == "PROVISIONING" {
+			logger.Info("Database is still provisioned. Starting Reconciliation.", "id", apiResp.ID, "state", apiResp.State)
+			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		}
+
+		dbCr.Status.State = apiResp.State
+		dbCr.Status.Endpoint = apiResp.Endpoint
+		if err := r.Status().Update(ctx, &dbCr); err != nil {
+			logger.Error(err, "Failed to update ManagedDatabase status")
+			return ctrl.Result{}, err
+		}
+
+		if apiResp.State == "FAILED" {
+			logger.Info("Remote failed to create db.", "id", apiResp.ID, "state", apiResp.State)
+		} else {
+			logger.Info("Resource created successfully.", "id", apiResp.ID, "state", apiResp.State)
+		}
+		return ctrl.Result{}, nil
+	case http.StatusNotFound:
+		logger.Info("Database with such ID does not exist.")
+		return ctrl.Result{}, nil
+	case http.StatusInternalServerError:
+		logger.Info("Internal server error. Starting Reconciliation.")
+		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 	default:
 		logger.Info("Unknown error", "status", resp.StatusCode)
 		return ctrl.Result{}, fmt.Errorf("unexpected status from API: %d", resp.StatusCode)
