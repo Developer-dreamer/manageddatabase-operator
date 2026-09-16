@@ -26,7 +26,6 @@ spec:
       type: string
     - jsonPath: .status.endpoint
       name: Endpoint
-      priority: 1
       type: string
     name: v1alpha1
     schema:

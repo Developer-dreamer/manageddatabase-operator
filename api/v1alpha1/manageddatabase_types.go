@@ -39,7 +39,7 @@ type ManagedDatabaseStatus struct {
 // +kubebuilder:printcolumn:name="Engine",type=string,JSONPath=`.spec.engine`
 // +kubebuilder:printcolumn:name="Size",type=integer,JSONPath=`.spec.sizeGB`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
-// +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint`,priority=1
+// +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint`
 
 // ManagedDatabase is the Schema for the manageddatabases API
 type ManagedDatabase struct {
