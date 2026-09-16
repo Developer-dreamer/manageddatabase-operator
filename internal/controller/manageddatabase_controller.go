@@ -54,6 +54,12 @@ func (r *ManagedDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Terminal failure check: never retry if the response was lost
+	if dbCr.Status.State == "ORPHANED_RESPONSE_LOST" {
+		logger.Info("Database creation failed with unrecoverable lost response. Manual intervention required.")
+		return ctrl.Result{}, nil
+	}
+
 	// Check if database exists and has state READY or FAILED
 	if dbCr.Status.DatabaseID != "" {
 		if dbCr.Status.State == "PROVISIONING" {
@@ -201,6 +207,48 @@ func (r *ManagedDatabaseReconciler) fetchStatus(ctx context.Context, dbCr demov1
 	default:
 		logger.Info("Unknown error", "status", resp.StatusCode)
 		return ctrl.Result{}, fmt.Errorf("unexpected status from API: %d", resp.StatusCode)
+	}
+}
+
+func (r *ManagedDatabaseReconciler) deleteExternalDatabase(ctx context.Context, dbCr *demov1alpha1.ManagedDatabase) error {
+	logger := logf.FromContext(ctx)
+
+	url := fmt.Sprintf("%s/databases/%s", r.ProvisionerURL, dbCr.Status.DatabaseID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		logger.Error(err, "Construct HTTP request failed")
+		return err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logger.Error(err, "HTTP request failed")
+		return err // Controller-runtime will re-queue with backoff
+	}
+	defer func() {
+		// Draining leftovers to reuse TCP socket from idle connections
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Error(closeErr, "failed to close response body")
+			if err == nil {
+				err = closeErr
+			}
+		}
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		logger.Info("Successfully deleted database on remote.")
+		return nil
+	case http.StatusNotFound:
+		logger.Info("Database with such ID does not exist.")
+		return nil
+	case http.StatusInternalServerError, http.StatusServiceUnavailable:
+		logger.Info("Internal server error. Starting Reconciliation.")
+		return fmt.Errorf("internal server error. starting Reconciliation")
+	default:
+		logger.Info("Unknown error", "status", resp.StatusCode)
+		return fmt.Errorf("unknown status from API: %d", resp.StatusCode)
 	}
 }
 
