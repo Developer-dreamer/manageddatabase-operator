@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,6 +41,8 @@ type ManagedDatabaseReconciler struct {
 	ProvisionerURL string
 }
 
+const finalizerName = "manageddatabase.demo.example.com/finalizer"
+
 // +kubebuilder:rbac:groups=demo.example.com,resources=manageddatabases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=demo.example.com,resources=manageddatabases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=demo.example.com,resources=manageddatabases/finalizers,verbs=update
@@ -52,6 +55,17 @@ func (r *ManagedDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Get(ctx, req.NamespacedName, &dbCr); err != nil {
 		// If not found, it was deleted; ignore to stop reconciliation
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Check if the resource is scheduled for deletion
+	if !dbCr.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, &dbCr)
+	}
+
+	// Terminal failure check: never retry if the response was lost
+	if dbCr.Status.State == "ORPHANED_RESPONSE_LOST" {
+		logger.Info("Database creation failed with unrecoverable lost response. Manual intervention required.")
+		return ctrl.Result{}, nil
 	}
 
 	// Terminal failure check: never retry if the response was lost
@@ -75,6 +89,17 @@ func (r *ManagedDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 func (r *ManagedDatabaseReconciler) createDatabase(ctx context.Context, dbCr demov1alpha1.ManagedDatabase) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
+
+	// Adding finalizer to the resource. Used to lock object state when deleting
+	// (kubernetes does not delete it instantly however leaves as time window to process with remote deletion)
+	if !controllerutil.ContainsFinalizer(&dbCr, finalizerName) {
+		controllerutil.AddFinalizer(&dbCr, finalizerName)
+		if err := r.Update(ctx, &dbCr); err != nil {
+			return ctrl.Result{}, err
+		}
+		logger.Info("Added finalizer. Starting Reconciliation.")
+		return ctrl.Result{RequeueAfter: 1 * time.Microsecond}, nil // Requeueing instantly
+	}
 
 	payload := map[string]any{
 		"name":   dbCr.Name,
@@ -208,6 +233,29 @@ func (r *ManagedDatabaseReconciler) fetchStatus(ctx context.Context, dbCr demov1
 		logger.Info("Unknown error", "status", resp.StatusCode)
 		return ctrl.Result{}, fmt.Errorf("unexpected status from API: %d", resp.StatusCode)
 	}
+}
+
+func (r *ManagedDatabaseReconciler) handleDeletion(ctx context.Context, dbCr *demov1alpha1.ManagedDatabase) (ctrl.Result, error) {
+	logger := logf.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(dbCr, finalizerName) {
+		logger.Info("Finalizer does not exist. Can't remove resource properly.")
+		return ctrl.Result{}, nil
+	}
+
+	if dbCr.Status.DatabaseID != "" {
+		if err := r.deleteExternalDatabase(ctx, dbCr); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	controllerutil.RemoveFinalizer(dbCr, finalizerName)
+	if err := r.Update(ctx, dbCr); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("Successfully removed finalizer.", "id", dbCr.Status.DatabaseID)
+	return ctrl.Result{}, nil
 }
 
 func (r *ManagedDatabaseReconciler) deleteExternalDatabase(ctx context.Context, dbCr *demov1alpha1.ManagedDatabase) error {
