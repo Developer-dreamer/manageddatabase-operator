@@ -23,12 +23,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/Developer-dreamer/manageddatabase-operator.git/api/v1alpha1"
@@ -50,7 +50,7 @@ const finalizerName = "manageddatabase.demo.example.com/finalizer"
 func (r *ManagedDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
-	// Fetch the Custom Resource from the cluster
+	// 1. Fetch the Custom Resource from the cluster
 	var dbCr demov1alpha1.ManagedDatabase
 	if err := r.Get(ctx, req.NamespacedName, &dbCr); err != nil {
 		// If not found, it was deleted; ignore to stop reconciliation
@@ -60,12 +60,6 @@ func (r *ManagedDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Check if the resource is scheduled for deletion
 	if !dbCr.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, &dbCr)
-	}
-
-	// Terminal failure check: never retry if the response was lost
-	if dbCr.Status.State == "ORPHANED_RESPONSE_LOST" {
-		logger.Info("Database creation failed with unrecoverable lost response. Manual intervention required.")
-		return ctrl.Result{}, nil
 	}
 
 	// Terminal failure check: never retry if the response was lost
