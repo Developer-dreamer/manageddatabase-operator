@@ -117,5 +117,46 @@ var _ = Describe("ManagedDatabase Controller", func() {
 			Expect(updatedResource.Status.DatabaseID).To(Equal("db-9c69e07d"))
 			Expect(updatedResource.Status.State).To(Equal("PROVISIONING"))
 		})
+
+		It("should create a resource and set status to lost. now further recreation.", func() {
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/databases" {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer mockServer.Close()
+
+			controllerReconciler := &ManagedDatabaseReconciler{
+				Client:         k8sClient,
+				Scheme:         k8sClient.Scheme(),
+				ProvisionerURL: mockServer.URL,
+			}
+
+			// Finalizer added and Reconcile exited early...
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The finalizer is present. The controller executes the POST request.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+
+			// The reconciler successfully intercepts 500 error and sets required state
+			Expect(err).NotTo(HaveOccurred())
+
+			// Fetch the updated resource to verify Kubernetes state
+			updatedResource := &demov1alpha1.ManagedDatabase{}
+			err = k8sClient.Get(ctx, typeNamespacedName, updatedResource)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Assert the finalizer and status were applied correctly
+			Expect(updatedResource.Finalizers).To(ContainElement(finalizerName))
+			Expect(updatedResource.Status.DatabaseID).To(Equal(""))
+			Expect(updatedResource.Status.State).To(Equal("ORPHANED_RESPONSE_LOST"))
+		})
 	})
 })
