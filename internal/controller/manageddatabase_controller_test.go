@@ -75,7 +75,7 @@ var _ = Describe("ManagedDatabase Controller", func() {
 			}
 		})
 
-		It("should successfully create a database and update status", func() {
+		It("should successfully create a database and update status.", func() {
 			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPost && r.URL.Path == "/databases" {
 					w.WriteHeader(http.StatusCreated)
@@ -157,6 +157,51 @@ var _ = Describe("ManagedDatabase Controller", func() {
 			Expect(updatedResource.Finalizers).To(ContainElement(finalizerName))
 			Expect(updatedResource.Status.DatabaseID).To(Equal(""))
 			Expect(updatedResource.Status.State).To(Equal("ORPHANED_RESPONSE_LOST"))
+		})
+
+		It("should successfully delete the resource.", func() {
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Expecting a DELETE request targeting the specific mock ID
+				if r.Method == http.MethodDelete && r.URL.Path == "/databases/db-test-delete" {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer mockServer.Close()
+
+			controllerReconciler := &ManagedDatabaseReconciler{
+				Client:         k8sClient,
+				Scheme:         k8sClient.Scheme(),
+				ProvisionerURL: mockServer.URL,
+			}
+
+			// Blank resource created by the BeforeEach block
+			resource := &demov1alpha1.ManagedDatabase{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+
+			// Append the finalizer and update cluster state
+			resource.Finalizers = append(resource.Finalizers, finalizerName)
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+
+			// Set the DatabaseID in the Status subresource
+			resource.Status.DatabaseID = "db-test-delete"
+			Expect(k8sClient.Status().Update(ctx, resource)).To(Succeed())
+
+			// Issue the delete command.
+			// The finalizer prevents absolute deletion and applies the DeletionTimestamp.
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+
+			// Invoke Reconcile.
+			// It evaluates DeletionTimestamp != Zero and routes to handleDeletion.
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Assert the resource is permanently purged from the cluster
+			err = k8sClient.Get(ctx, typeNamespacedName, &demov1alpha1.ManagedDatabase{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 	})
 })
