@@ -42,6 +42,7 @@ type ManagedDatabaseReconciler struct {
 }
 
 const finalizerName = "manageddatabase.demo.example.com/finalizer"
+const defaultRetryAfterPolicy = 5 * time.Second
 
 // +kubebuilder:rbac:groups=demo.example.com,resources=manageddatabases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=demo.example.com,resources=manageddatabases/status,verbs=get;update;patch
@@ -143,14 +144,14 @@ func (r *ManagedDatabaseReconciler) createDatabase(ctx context.Context, dbCr dem
 			}
 
 			logger.Info("Successfully created database on remote. Waiting for READY/FAILED...", "id", apiResp.ID, "state", apiResp.State)
-			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			return ctrl.Result{RequeueAfter: defaultRetryAfterPolicy}, nil
 		}
 	case http.StatusBadRequest:
 		logger.Info("Failed to create Database. Double check requested fields and try again.")
 		return ctrl.Result{}, nil
 	case http.StatusServiceUnavailable:
 		logger.Info("Service unavailable. Starting Reconciliation.")
-		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		return ctrl.Result{RequeueAfter: defaultRetryAfterPolicy}, nil
 	case http.StatusInternalServerError:
 		// Since I can't programmatically resolve this issue, the only way is to force
 		// kubernetes track state as FAILED and dropping this manifest.
@@ -201,7 +202,7 @@ func (r *ManagedDatabaseReconciler) fetchStatus(ctx context.Context, dbCr demov1
 
 		if apiResp.Endpoint == "" && apiResp.State == "PROVISIONING" {
 			logger.Info("Database is still provisioned. Starting Reconciliation.", "id", apiResp.ID, "state", apiResp.State)
-			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			return ctrl.Result{RequeueAfter: defaultRetryAfterPolicy}, nil
 		}
 
 		dbCr.Status.State = apiResp.State
@@ -222,7 +223,7 @@ func (r *ManagedDatabaseReconciler) fetchStatus(ctx context.Context, dbCr demov1
 		return ctrl.Result{}, nil
 	case http.StatusInternalServerError:
 		logger.Info("Internal server error. Starting Reconciliation.")
-		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		return ctrl.Result{RequeueAfter: defaultRetryAfterPolicy}, nil
 	default:
 		logger.Info("Unknown error", "status", resp.StatusCode)
 		return ctrl.Result{}, fmt.Errorf("unexpected status from API: %d", resp.StatusCode)
